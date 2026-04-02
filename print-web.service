@@ -1,0 +1,16 @@
+[Unit]
+Description=print-web (local print portal)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lulu
+WorkingDirectory=/home/lulu/print-web
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/lulu/print-web/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Preview & Print</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="top">
+        <div>
+          <div class="title">Preview</div>
+          <div class="sub">Pilih printer, set copies, lalu print</div>
+        </div>
+        <a class="link" href="/">upload lagi</a>
+      </header>
+
+      <section class="card">
+        <h2>Preview PDF</h2>
+        <div class="frameWrap">
+          <iframe class="frame" src="/files/{{ file_id }}.pdf"></iframe>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Print</h2>
+        <form id="printForm" class="row" action="/print" method="post">
+          <input type="hidden" name="file_id" value="{{ file_id }}" />
+          <select class="sel" name="printer" id="printerSel" required></select>
+          <input class="copies" type="number" min="1" max="99" value="1" name="copies" />
+          <button class="btn" type="submit">Print</button>
+        </form>
+        <div id="status" class="hint"></div>
+      </section>
+    </main>
+
+    <script>
+      async function initPrinters() {
+        const sel = document.getElementById("printerSel");
+        const status = document.getElementById("status");
+        sel.innerHTML = "";
+        try {
+          const r = await fetch("/printers");
+          const j = await r.json();
+          const printers = (j.printers || []);
+          if (!printers.length) {
+            const opt = document.createElement("option");
+            opt.value = "";
+            opt.textContent = "Tidak ada printer (CUPS belum siap)";
+            sel.appendChild(opt);
+            sel.disabled = true;
+            return;
+          }
+          for (const p of printers) {
+            const opt = document.createElement("option");
+            opt.value = p;
+            opt.textContent = p;
+            sel.appendChild(opt);
+          }
+        } catch (e) {
+          status.textContent = "Gagal ambil daftar printer.";
+        }
+      }
+
+      document.getElementById("printForm").addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const status = document.getElementById("status");
+        status.textContent = "Mengirim job...";
+        try {
+          const form = ev.target;
+          const body = new FormData(form);
+          const r = await fetch("/print", { method: "POST", body });
+          const j = await r.json();
+          if (!r.ok) {
+            status.textContent = "Gagal: " + (j.detail || r.statusText);
+            return;
+          }
+          status.textContent = "OK: " + (j.result || "sent");
+        } catch (e) {
+          status.textContent = "Gagal kirim print.";
+        }
+      });
+
+      initPrinters();
+    </script>
+  </body>
+</html>

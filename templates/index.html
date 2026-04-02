@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Print Web</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="top">
+        <div>
+          <div class="title">Print Web (Local)</div>
+          <div class="sub">Upload PDF/DOC/DOCX → preview → print via CUPS</div>
+        </div>
+        <a class="link" href="/health" target="_blank" rel="noreferrer">health</a>
+      </header>
+
+      <section class="card">
+        <h2>Upload</h2>
+        <form class="row" action="/upload" method="post" enctype="multipart/form-data">
+          <input class="file" type="file" name="file" accept=".pdf,.doc,.docx,application/pdf" required />
+          <button class="btn" type="submit">Upload & Preview</button>
+        </form>
+        <div class="hint">
+          Tips: paling stabil kalau PDF. DOC/DOCX bakal di-convert dulu (butuh LibreOffice).
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Printer</h2>
+        <div id="printers" class="mono">Loading...</div>
+        <div class="hint">Pastikan printer sudah ada di CUPS: <span class="mono">http://IP-SERVER:631</span></div>
+      </section>
+    </main>
+
+    <script>
+      async function loadPrinters() {
+        const el = document.getElementById("printers");
+        try {
+          const r = await fetch("/printers");
+          const j = await r.json();
+          const printers = (j.printers || []);
+          if (!printers.length) {
+            el.textContent = "Belum ada printer terdeteksi (lpstat -p kosong).";
+            return;
+          }
+          el.innerHTML = printers.map(p => `<div class="pill">${p}</div>`).join("");
+        } catch (e) {
+          el.textContent = "Gagal load printers. Pastikan CUPS/cups-client terpasang.";
+        }
+      }
+      loadPrinters();
+    </script>
+  </body>
+</html>
