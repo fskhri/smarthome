@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -12,6 +13,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pypdf import PdfReader, PdfWriter
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -84,6 +86,42 @@ def convert_to_pdf(input_path: Path, out_dir: Path) -> Path:
     if not pdf_path.exists():
         raise HTTPException(status_code=500, detail="Convert failed: PDF not produced")
     return pdf_path
+
+
+def parse_page_range(page_range: str, total: int) -> list[int]:
+    """Parse a page-range string like '1,3,5-7' into sorted 1-indexed page numbers."""
+    pages: set[int] = set()
+    for part in page_range.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            halves = part.split("-", 1)
+            try:
+                start, end = int(halves[0].strip()), int(halves[1].strip())
+                for p in range(start, end + 1):
+                    if 1 <= p <= total:
+                        pages.add(p)
+            except ValueError:
+                pass
+        else:
+            try:
+                p = int(part)
+                if 1 <= p <= total:
+                    pages.add(p)
+            except ValueError:
+                pass
+    return sorted(pages)
+
+
+def _build_reordered_pdf(original_pdf: Path, output_pdf: Path, pages: list[int]) -> None:
+    """Write a new PDF containing only the given 1-indexed pages (in order)."""
+    reader = PdfReader(str(original_pdf))
+    writer = PdfWriter()
+    for page_num in pages:
+        writer.add_page(reader.pages[page_num - 1])
+    with open(str(output_pdf), "wb") as fh:
+        writer.write(fh)
 
 
 def print_file(printer: str, file_path: Path, copies: int = 1) -> str:
@@ -189,6 +227,86 @@ def do_print(
         raise HTTPException(status_code=404, detail="File not found")
     result = print_file(printer, pdf_path, copies=copies)
     return {"ok": True, "result": result}
+
+
+@app.post("/reorder-and-print")
+def reorder_and_print(
+    file_id: str = Form(...),
+    printer: str = Form(...),
+    copies: int = Form(1),
+    page_order: str = Form("[]"),
+    page_range: str = Form("all"),
+    orientation: str = Form("portrait"),
+    pages_per_sheet: int = Form(1),
+    color_mode: str = Form("color"),
+):
+    available = set(list_printers())
+    if printer not in available:
+        raise HTTPException(status_code=400, detail="Printer not found in CUPS")
+
+    job_dir = UPLOADS_DIR / file_id
+    original_pdf = job_dir / "document.pdf"
+    if not original_pdf.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if copies < 1 or copies > 99:
+        raise HTTPException(status_code=400, detail="Invalid copies")
+
+    # Parse and validate page order
+    try:
+        order: list[int] = json.loads(page_order)
+        if not isinstance(order, list):
+            order = []
+    except (json.JSONDecodeError, ValueError):
+        order = []
+
+    reader = PdfReader(str(original_pdf))
+    total_pages = len(reader.pages)
+    natural_order = list(range(1, total_pages + 1))
+
+    # Sanitise: keep only valid 1-based page numbers
+    order = [p for p in order if isinstance(p, int) and 1 <= p <= total_pages]
+    if not order:
+        order = natural_order
+
+    # Determine which pages to include
+    if page_range.strip().lower() == "all":
+        pages_to_print = order
+    else:
+        range_indices = parse_page_range(page_range, len(order))
+        pages_to_print = [order[i - 1] for i in range_indices if 1 <= i <= len(order)]
+        if not pages_to_print:
+            raise HTTPException(status_code=400, detail="Page range produced no pages")
+
+    # Build a processed PDF only when needed
+    is_natural = pages_to_print == natural_order
+    if is_natural:
+        pdf_to_print = original_pdf
+    else:
+        reordered_pdf = job_dir / "document_reordered.pdf"
+        _build_reordered_pdf(original_pdf, reordered_pdf, pages_to_print)
+        pdf_to_print = reordered_pdf
+
+    # Build lp command
+    args = ["lp", "-d", printer, "-n", str(copies)]
+
+    # Orientation: 3 = portrait, 4 = landscape
+    if orientation == "landscape":
+        args += ["-o", "orientation-requested=4"]
+    else:
+        args += ["-o", "orientation-requested=3"]
+
+    # Pages per sheet
+    if pages_per_sheet in (2, 4):
+        args += ["-o", f"number-up={pages_per_sheet}"]
+
+    # Color mode
+    if color_mode == "grayscale":
+        args += ["-o", "ColorModel=Gray"]
+
+    args.append(str(pdf_to_print))
+    cp = _run(args, timeout_s=30)
+    return {"ok": True, "result": (cp.stdout or "").strip()}
 
 
 @app.get("/health")

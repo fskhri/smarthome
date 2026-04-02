@@ -3,47 +3,335 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Preview & Print</title>
+    <title>Preview &amp; Print</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <main class="wrap">
+    <main class="wrap preview-wrap">
       <header class="top">
         <div>
-          <div class="title">Preview</div>
-          <div class="sub">Pilih printer, set copies, lalu print</div>
+          <div class="title">Preview &amp; Print</div>
+          <div class="sub">Drag thumbnail untuk reorder halaman, atur settings, lalu print</div>
         </div>
         <a class="link" href="/">upload lagi</a>
       </header>
 
-      <section class="card">
-        <h2>Preview PDF</h2>
-        <div class="frameWrap">
-          <iframe class="frame" src="/files/{{ file_id }}.pdf"></iframe>
-        </div>
-      </section>
+      <div class="preview-layout">
+        <!-- Thumbnail sidebar -->
+        <aside class="thumb-sidebar">
+          <div class="thumb-sidebar-title">Halaman</div>
+          <div class="thumb-list" id="thumbList"></div>
+        </aside>
 
-      <section class="card">
-        <h2>Print</h2>
-        <form id="printForm" class="row" action="/print" method="post">
+        <!-- Main preview area -->
+        <div class="preview-main">
+          <!-- Page nav + zoom -->
+          <div class="page-nav card">
+            <button class="btn btn-sm" id="btnPrev" disabled>&#8592; Prev</button>
+            <span class="page-indicator" id="pageIndicator">Memuat…</span>
+            <button class="btn btn-sm" id="btnNext" disabled>Next &#8594;</button>
+            <div class="zoom-controls">
+              <button class="btn btn-sm" id="btnZoomOut">&#8722;</button>
+              <span class="zoom-label" id="zoomLabel">150%</span>
+              <button class="btn btn-sm" id="btnZoomIn">&#43;</button>
+              <button class="btn btn-sm" id="btnFitWidth">Fit</button>
+            </div>
+          </div>
+
+          <!-- Main canvas -->
+          <div class="canvas-wrap" id="canvasWrap">
+            <canvas id="mainCanvas"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <!-- Print settings -->
+      <section class="card print-settings-card">
+        <h2>Print Settings</h2>
+        <form id="printForm" class="print-settings-form">
           <input type="hidden" name="file_id" value="{{ file_id }}" />
-          <select class="sel" name="printer" id="printerSel" required></select>
-          <input class="copies" type="number" min="1" max="99" value="1" name="copies" />
-          <button class="btn" type="submit">Print</button>
+          <input type="hidden" name="page_order" id="pageOrderInput" value="[]" />
+
+          <div class="settings-grid">
+            <div class="settings-group">
+              <label class="settings-label">Printer</label>
+              <select class="sel" name="printer" id="printerSel" required></select>
+            </div>
+
+            <div class="settings-group">
+              <label class="settings-label">Copies</label>
+              <input class="copies" type="number" min="1" max="99" value="1" name="copies" />
+            </div>
+
+            <div class="settings-group">
+              <label class="settings-label">Orientation</label>
+              <select class="sel" name="orientation">
+                <option value="portrait">Portrait</option>
+                <option value="landscape">Landscape</option>
+              </select>
+            </div>
+
+            <div class="settings-group">
+              <label class="settings-label">Per Sheet</label>
+              <select class="sel" name="pages_per_sheet">
+                <option value="1">1 halaman</option>
+                <option value="2">2 halaman</option>
+                <option value="4">4 halaman</option>
+              </select>
+            </div>
+
+            <div class="settings-group">
+              <label class="settings-label">Warna</label>
+              <select class="sel" name="color_mode">
+                <option value="color">Color</option>
+                <option value="grayscale">Grayscale</option>
+              </select>
+            </div>
+
+            <div class="settings-group settings-group-wide">
+              <label class="settings-label">Halaman</label>
+              <div class="range-row">
+                <label class="radio-label">
+                  <input type="radio" name="page_range_type" value="all" checked /> Semua
+                </label>
+                <label class="radio-label">
+                  <input type="radio" name="page_range_type" value="custom" /> Custom
+                </label>
+                <input
+                  class="range-input"
+                  type="text"
+                  id="pageRangeInput"
+                  name="page_range_custom"
+                  placeholder="e.g. 1,3,5-7"
+                  disabled
+                />
+              </div>
+            </div>
+          </div>
+
+          <div class="print-footer">
+            <button class="btn" type="submit" id="btnPrint">Print</button>
+            <div id="printStatus" class="hint"></div>
+          </div>
         </form>
-        <div id="status" class="hint"></div>
       </section>
     </main>
 
-    <script>
+    <script type="module">
+      import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.min.mjs";
+      pdfjsLib.GlobalWorkerOptions.workerSrc =
+        "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.worker.min.mjs";
+
+      const FILE_ID = "{{ file_id }}";
+      const PDF_URL = `/files/${FILE_ID}.pdf`;
+
+      let pdfDoc = null;
+      let pageOrder = []; // 1-based original page numbers, in display order
+      let currentPage = 1; // current display position (1-based)
+      let scale = 1.5;
+      let fitWidthMode = false;
+
+      // ── Load PDF ─────────────────────────────────────────────────────────
+      async function loadPDF() {
+        const loadingTask = pdfjsLib.getDocument(PDF_URL);
+        pdfDoc = await loadingTask.promise;
+        const total = pdfDoc.numPages;
+        pageOrder = Array.from({ length: total }, (_, i) => i + 1);
+        updatePageOrderInput();
+        await buildThumbnails();
+        await renderPage(1);
+      }
+
+      // ── Render main canvas ───────────────────────────────────────────────
+      async function renderPage(displayPos) {
+        currentPage = displayPos;
+        const pageNum = pageOrder[displayPos - 1];
+        const page = await pdfDoc.getPage(pageNum);
+        const canvas = document.getElementById("mainCanvas");
+        const ctx = canvas.getContext("2d");
+        const wrap = document.getElementById("canvasWrap");
+
+        let usedScale = scale;
+        if (fitWidthMode) {
+          const vp0 = page.getViewport({ scale: 1 });
+          usedScale = (wrap.clientWidth - 32) / vp0.width;
+        }
+
+        const viewport = page.getViewport({ scale: usedScale });
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        await page.render({ canvasContext: ctx, viewport }).promise;
+
+        updatePageIndicator();
+        setActiveThumbnail(displayPos);
+      }
+
+      function updatePageIndicator() {
+        document.getElementById("pageIndicator").textContent =
+          `Halaman ${currentPage} / ${pageOrder.length}`;
+        document.getElementById("btnPrev").disabled = currentPage <= 1;
+        document.getElementById("btnNext").disabled = currentPage >= pageOrder.length;
+      }
+
+      // ── Thumbnails ───────────────────────────────────────────────────────
+      const THUMB_SCALE = 0.18;
+
+      async function buildThumbnails() {
+        const list = document.getElementById("thumbList");
+        list.innerHTML = "";
+        for (let i = 0; i < pageOrder.length; i++) {
+          const card = createThumbCard(i + 1);
+          list.appendChild(card);
+          renderThumbnail(card.querySelector(".thumb-canvas"), pageOrder[i]);
+        }
+      }
+
+      function createThumbCard(pos) {
+        const card = document.createElement("div");
+        card.className = "thumb-card";
+        card.dataset.pos = pos;
+        card.draggable = true;
+
+        const canvas = document.createElement("canvas");
+        canvas.className = "thumb-canvas";
+        card.appendChild(canvas);
+
+        const label = document.createElement("div");
+        label.className = "thumb-label";
+        label.textContent = pos;
+        card.appendChild(label);
+
+        card.addEventListener("click", () => renderPage(parseInt(card.dataset.pos, 10)));
+        card.addEventListener("dragstart", onDragStart);
+        card.addEventListener("dragover", onDragOver);
+        card.addEventListener("dragleave", onDragLeave);
+        card.addEventListener("drop", onDrop);
+        card.addEventListener("dragend", onDragEnd);
+        return card;
+      }
+
+      async function renderThumbnail(canvas, pageNum) {
+        const page = await pdfDoc.getPage(pageNum);
+        const viewport = page.getViewport({ scale: THUMB_SCALE });
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+      }
+
+      function setActiveThumbnail(pos) {
+        document.querySelectorAll(".thumb-card").forEach((c) => {
+          c.classList.toggle("thumb-active", parseInt(c.dataset.pos, 10) === pos);
+        });
+      }
+
+      function refreshThumbnailLabels() {
+        document.querySelectorAll(".thumb-card").forEach((card, idx) => {
+          card.dataset.pos = idx + 1;
+          card.querySelector(".thumb-label").textContent = idx + 1;
+        });
+      }
+
+      // ── Drag and Drop ────────────────────────────────────────────────────
+      let dragSrcEl = null;
+
+      function onDragStart(e) {
+        dragSrcEl = this;
+        this.classList.add("thumb-dragging");
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", this.dataset.pos);
+      }
+
+      function onDragOver(e) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        this.classList.add("thumb-dragover");
+      }
+
+      function onDragLeave() {
+        this.classList.remove("thumb-dragover");
+      }
+
+      function onDrop(e) {
+        e.stopPropagation();
+        e.preventDefault();
+        this.classList.remove("thumb-dragover");
+        if (dragSrcEl === this) return;
+
+        const list = document.getElementById("thumbList");
+        const cards = [...list.querySelectorAll(".thumb-card")];
+        const srcIdx = cards.indexOf(dragSrcEl);
+        const dstIdx = cards.indexOf(this);
+
+        // Reorder the pageOrder array
+        const [moved] = pageOrder.splice(srcIdx, 1);
+        pageOrder.splice(dstIdx, 0, moved);
+
+        // Move DOM element
+        if (srcIdx < dstIdx) {
+          list.insertBefore(dragSrcEl, this.nextSibling);
+        } else {
+          list.insertBefore(dragSrcEl, this);
+        }
+
+        refreshThumbnailLabels();
+        updatePageOrderInput();
+        renderPage(currentPage);
+      }
+
+      function onDragEnd() {
+        this.classList.remove("thumb-dragging");
+        document.querySelectorAll(".thumb-dragover").forEach((c) =>
+          c.classList.remove("thumb-dragover")
+        );
+      }
+
+      function updatePageOrderInput() {
+        document.getElementById("pageOrderInput").value = JSON.stringify(pageOrder);
+      }
+
+      // ── Navigation ───────────────────────────────────────────────────────
+      document.getElementById("btnPrev").addEventListener("click", () => {
+        if (currentPage > 1) renderPage(currentPage - 1);
+      });
+      document.getElementById("btnNext").addEventListener("click", () => {
+        if (currentPage < pageOrder.length) renderPage(currentPage + 1);
+      });
+
+      // ── Zoom ─────────────────────────────────────────────────────────────
+      document.getElementById("btnZoomIn").addEventListener("click", () => {
+        fitWidthMode = false;
+        scale = Math.min(scale + 0.25, 4);
+        document.getElementById("zoomLabel").textContent = Math.round(scale * 100) + "%";
+        renderPage(currentPage);
+      });
+      document.getElementById("btnZoomOut").addEventListener("click", () => {
+        fitWidthMode = false;
+        scale = Math.max(scale - 0.25, 0.5);
+        document.getElementById("zoomLabel").textContent = Math.round(scale * 100) + "%";
+        renderPage(currentPage);
+      });
+      document.getElementById("btnFitWidth").addEventListener("click", () => {
+        fitWidthMode = true;
+        document.getElementById("zoomLabel").textContent = "Fit";
+        renderPage(currentPage);
+      });
+
+      // ── Page range radio ─────────────────────────────────────────────────
+      document.querySelectorAll('input[name="page_range_type"]').forEach((radio) => {
+        radio.addEventListener("change", () => {
+          const customInput = document.getElementById("pageRangeInput");
+          customInput.disabled = radio.value !== "custom";
+          if (radio.value !== "custom") customInput.value = "";
+        });
+      });
+
+      // ── Printers ─────────────────────────────────────────────────────────
       async function initPrinters() {
         const sel = document.getElementById("printerSel");
-        const status = document.getElementById("status");
-        sel.innerHTML = "";
         try {
           const r = await fetch("/printers");
           const j = await r.json();
-          const printers = (j.printers || []);
+          const printers = j.printers || [];
           if (!printers.length) {
             const opt = document.createElement("option");
             opt.value = "";
@@ -58,31 +346,42 @@
             opt.textContent = p;
             sel.appendChild(opt);
           }
-        } catch (e) {
-          status.textContent = "Gagal ambil daftar printer.";
+        } catch {
+          document.getElementById("printStatus").textContent = "Gagal ambil daftar printer.";
         }
       }
 
+      // ── Print form ────────────────────────────────────────────────────────
       document.getElementById("printForm").addEventListener("submit", async (ev) => {
         ev.preventDefault();
-        const status = document.getElementById("status");
-        status.textContent = "Mengirim job...";
+        const status = document.getElementById("printStatus");
+        status.textContent = "Mengirim job…";
+        const form = ev.target;
+        const fd = new FormData(form);
+
+        const rangeType = form.querySelector('input[name="page_range_type"]:checked').value;
+        const rangeCustom = fd.get("page_range_custom") || "";
+        fd.set("page_range", rangeType === "custom" && rangeCustom.trim() ? rangeCustom.trim() : "all");
+        fd.delete("page_range_custom");
+        fd.delete("page_range_type");
+
         try {
-          const form = ev.target;
-          const body = new FormData(form);
-          const r = await fetch("/print", { method: "POST", body });
+          const r = await fetch("/reorder-and-print", { method: "POST", body: fd });
           const j = await r.json();
           if (!r.ok) {
             status.textContent = "Gagal: " + (j.detail || r.statusText);
             return;
           }
           status.textContent = "OK: " + (j.result || "sent");
-        } catch (e) {
+        } catch {
           status.textContent = "Gagal kirim print.";
         }
       });
 
+      // ── Init ─────────────────────────────────────────────────────────────
       initPrinters();
+      loadPDF();
     </script>
   </body>
 </html>
+
